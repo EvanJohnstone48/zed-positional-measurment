@@ -16,7 +16,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from zed_positional_measurement.config import PipelineConfig
-from zed_positional_measurement.models import CornerDetection, PaperDetection, SegmentManifestEntry
+from zed_positional_measurement.models import CornerDetection, FrameTelemetryRecord, PaperDetection, SegmentManifestEntry
 from zed_positional_measurement.pipeline import MeasurementPipeline
 from zed_positional_measurement.sdk import DetectionContext, FrameBuffers, PaperObservation, PlaneSnapshot, PoseSnapshot
 from zed_positional_measurement.storage import SessionStore, read_jsonl
@@ -159,6 +159,14 @@ class FakeAdapter:
         buffers.image_size = frame.image_size
         buffers.__dict__["current_points"] = frame.points
         buffers.__dict__["current_depths"] = frame.depths
+
+
+class FakeTelemetryProvider:
+    def __init__(self, record: FrameTelemetryRecord | None = None):
+        self.record = record
+
+    def get(self, timestamp_ns: int) -> FrameTelemetryRecord | None:
+        return self.record
 
 
 class FakeLiveRecordAdapter:
@@ -516,6 +524,115 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("papers", rows[0])
         self.assertEqual(rows[0]["papers"][0]["plane_id"], "plane-0001")
         self.assertEqual(rows[0]["planes"][0]["source"], "paper_center")
+
+    def test_process_segment_telemetry_is_none_without_provider(self) -> None:
+        output_dir = TMP_ROOT / "pipeline-no-telemetry"
+        shutil.rmtree(output_dir, ignore_errors=True)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        config = PipelineConfig.from_dict(
+            {
+                "paper": {"mode": "external_boxes"},
+                "runtime": {
+                    "root_dir": str(output_dir),
+                    "session_id": "session-no-telem",
+                },
+            }
+        )
+        pose = PoseSnapshot(
+            timestamp_ns=100,
+            tracking_state="OK",
+            tracking_confidence=99,
+            pose_world_xyz=(0.0, 0.0, 0.0),
+            pose_world_xyzw=(0.0, 0.0, 0.0, 1.0),
+        )
+        frames = {
+            "segment-00001": [
+                _Frame(
+                    pose=pose,
+                    paper_observations=[],
+                    points={},
+                    depths={},
+                    planes_by_pixel={},
+                    image_size=(100, 50),
+                )
+            ]
+        }
+        store = _make_store(output_dir, config)
+        pipeline = MeasurementPipeline(
+            config,
+            adapter=FakeAdapter(frames),
+            paper_provider=FakePaperProvider({}),
+            corner_provider=FakeCornerProvider({}),
+        )
+        pipeline.process_segment(store.paths.root, "segment-00001", finalized=False)
+        frames_out = store.read_frame_cache("segment-00001", finalized=False)
+        self.assertEqual(len(frames_out), 1)
+        self.assertIsNone(frames_out[0].telemetry)
+
+    def test_process_segment_attaches_telemetry_when_provider_is_set(self) -> None:
+        output_dir = TMP_ROOT / "pipeline-with-telemetry"
+        shutil.rmtree(output_dir, ignore_errors=True)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        config = PipelineConfig.from_dict(
+            {
+                "paper": {"mode": "external_boxes"},
+                "runtime": {
+                    "root_dir": str(output_dir),
+                    "session_id": "session-with-telem",
+                },
+            }
+        )
+        pose = PoseSnapshot(
+            timestamp_ns=100,
+            tracking_state="OK",
+            tracking_confidence=99,
+            pose_world_xyz=(0.0, 0.0, 0.0),
+            pose_world_xyzw=(0.0, 0.0, 0.0, 1.0),
+        )
+        frames = {
+            "segment-00001": [
+                _Frame(
+                    pose=pose,
+                    paper_observations=[],
+                    points={},
+                    depths={},
+                    planes_by_pixel={},
+                    image_size=(100, 50),
+                )
+            ]
+        }
+        telem_record = FrameTelemetryRecord(
+            heading_rad=1.57,
+            heading_var=0.01,
+            heading_good_for_control=True,
+            gps_lat_deg=49.2,
+            gps_lon_deg=-123.1,
+            gps_alt_m=100.0,
+            gps_eph=1.2,
+            gps_epv=2.3,
+            gps_fix_type=3,
+            gps_hdop=0.8,
+            gps_satellites_used=12,
+            mag_xyz_gauss=(0.1, 0.2, 0.3),
+            imu_gyro_rad=(0.01, 0.02, 0.03),
+            imu_accel_m_s2=(0.0, 0.0, -9.81),
+            alignment_offset_ns=5000,
+        )
+        store = _make_store(output_dir, config)
+        pipeline = MeasurementPipeline(
+            config,
+            adapter=FakeAdapter(frames),
+            paper_provider=FakePaperProvider({}),
+            corner_provider=FakeCornerProvider({}),
+            telemetry_provider=FakeTelemetryProvider(telem_record),
+        )
+        pipeline.process_segment(store.paths.root, "segment-00001", finalized=False)
+        frames_out = store.read_frame_cache("segment-00001", finalized=False)
+        self.assertEqual(len(frames_out), 1)
+        self.assertIsNotNone(frames_out[0].telemetry)
+        self.assertAlmostEqual(frames_out[0].telemetry.heading_rad, 1.57)
+        self.assertEqual(frames_out[0].telemetry.gps_satellites_used, 12)
+        self.assertEqual(frames_out[0].telemetry.mag_xyz_gauss, (0.1, 0.2, 0.3))
 
     def test_process_segment_uses_nine_scene_probe_points_by_default(self) -> None:
         output_dir = TMP_ROOT / "pipeline-scene-probes"

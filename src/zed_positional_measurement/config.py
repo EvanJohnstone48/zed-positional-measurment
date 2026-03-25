@@ -83,11 +83,39 @@ class PlaneDetectionConfig:
 
 
 @dataclass(frozen=True)
+class StreamingConfig:
+    enabled: bool = True
+    detector_output_dir: str | None = None
+    detector_poll_interval_ms: int = 100
+    detector_timeout_ms: int = 30000
+
+
+@dataclass(frozen=True)
 class RuntimeConfig:
     root_dir: str = "runs"
     session_id: str | None = None
     process_spawn: bool = True
     detector_image_size: tuple[int, int] | None = None
+
+
+def _default_telemetry_topics() -> dict[str, str]:
+    return {
+        "local_position": "/fmu/out/vehicle_local_position",
+        "global_position": "/fmu/out/vehicle_global_position",
+        "sensor_gps": "/fmu/out/sensor_gps",
+        "sensor_mag": "/fmu/out/sensor_mag",
+        "sensor_combined": "/fmu/out/sensor_combined",
+    }
+
+
+@dataclass(frozen=True)
+class TelemetryConfig:
+    enabled: bool = False
+    snapshot_rate_hz: int = 30
+    topics: dict[str, str] = field(default_factory=_default_telemetry_topics)
+    poll_interval_ms: int = 100
+    timeout_ms: int = 10000
+    max_alignment_offset_ns: int = 100_000_000
 
 
 @dataclass(frozen=True)
@@ -98,6 +126,8 @@ class PipelineConfig:
     corners: CornerConfig = field(default_factory=CornerConfig)
     plane_detection: PlaneDetectionConfig = field(default_factory=PlaneDetectionConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
+    streaming: StreamingConfig = field(default_factory=StreamingConfig)
+    telemetry: TelemetryConfig = field(default_factory=TelemetryConfig)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -125,6 +155,8 @@ class PipelineConfig:
             **raw_plane_detection,
         )
         runtime = RuntimeConfig(**raw.get("runtime", {}))
+        streaming = StreamingConfig(**raw.get("streaming", {}))
+        telemetry = TelemetryConfig(**raw.get("telemetry", {}))
         return cls(
             recording=recording,
             tracking=tracking,
@@ -132,6 +164,8 @@ class PipelineConfig:
             corners=corners,
             plane_detection=plane_detection,
             runtime=runtime,
+            streaming=streaming,
+            telemetry=telemetry,
         )
 
     @classmethod

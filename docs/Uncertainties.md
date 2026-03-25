@@ -2,44 +2,33 @@
 
 ## Purpose
 
-This document captures the remaining design questions for the live ZED pipeline so they can be clarified with Matt before the live-first refactor is implemented.
+This document captures the remaining design questions for the ZED pipeline.
 
 ## Already Decided
 
-- The system should use the ZED SDK live while recording.
-- SVO recording should be available behind `recording.enable_svo_recording` for audit, debugging, and neural net usage.
+- The system uses SVO-first streaming: live thread records SVO2, workers replay for processing.
+- SVO recording is required for the pipeline to function.
 - Lucas's code will run on the same Jetson on the drone.
-- The external detector is a YOLO + Roboflow process that is not part of this repo.
+- The external detector (Worker 1) is a YOLO + Roboflow process that is not part of this repo.
 - This repo should not calculate corners itself.
 - This repo should pass plane information and plane normals to Lucas.
 - Use the detector center pixel for measurement.
-- The live handoff should be append-only.
-- The live handoff should be one JSON object per frame.
+- The handoff should be append-only, streaming per-frame to `frames.jsonl`.
+- The handoff should be one JSON object per frame.
 - Frame-level plane discovery should use:
   - `find_plane_at_hit` at each paper center
   - 9 extra fixed scene probes in a 3x3 normalized image grid
   - simple plane dedupe
   - `include_floor_plane = false` by default
+- **Detector integration: JSONL file handoff.** Worker 1 writes one JSONL file per segment to a configured directory. Worker 2 tails those files with poll/wait via `TailingPaperProvider`.
+- **GNSS fusion is compatible** with this architecture — GNSS data stored as SVO2 sidecar for future replay.
+- **PX4 telemetry integration: decided.** A `TelemetryCollector` subscribes to existing ROS2 PX4 topics during recording and writes a per-session JSONL sidecar. Worker 2 reads the sidecar during SVO2 replay and attaches heading, GPS, magnetometer, and IMU data to each frame. Data source: existing AEAC2026 ROS2 workspace topics. Topic names are configurable via `telemetry.topics`.
 
 ## Open Questions For Matt
 
-### 1. Detector Integration Boundary
+### 1. ~~Detector Integration Boundary~~ (Resolved)
 
-Current uncertainty:
-
-- We do not yet know how the external YOLO + Roboflow detector will connect to this repo.
-
-Options to clarify:
-
-- direct Python callback/function call
-- local in-memory queue
-- local HTTP endpoint
-- websocket
-- watched file / append-only sidecar
-
-Current implementation assumption for later refactor:
-
-- create a clear placeholder detector adapter boundary and keep the detector out of this repo
+Decided: JSONL file handoff between Worker 1 and Worker 2. Configured via `streaming.detector_output_dir`.
 
 ### 2. Detector Output Contract
 
@@ -57,12 +46,9 @@ Need to confirm:
 - whether frame id and timestamp are both available
 - whether the detector output is synchronized to the exact ZED frame grab
 
-### 3. Live Handoff File Contract
+### 3. ~~Live Handoff File Contract~~ (Resolved)
 
-Current resolved assumption:
-
-- one append-only per-session `frames.jsonl`
-- one JSON object per frame
+Decided: one append-only per-session `frames.jsonl`, one JSON object per frame, streamed per-frame during processing.
 
 Remaining optional question:
 
@@ -117,18 +103,13 @@ Recommended assumption:
 - implement a service class with explicit `start_session()` and `stop_session()`
 - keep a thin CLI wrapper for local testing
 
-## What This Means For The Refactor
+## Architecture Summary
 
-The next implementation should move from:
+The pipeline uses SVO-first streaming:
 
-- record first, replay later
+- live ZED capture records SVO2 segments
+- Worker 1 (external) replays segments for NN detection, writes detection JSONL
+- Worker 2 (this repo) replays segments for tracking/depth/planes, reads Worker 1's detections, streams frame objects to `frames.jsonl`
+- Lucas tails `frames.jsonl` on the same Jetson
 
-to:
-
-- live ZED capture
-- live positional tracking
-- live per-frame measurement packaging
-- append-only frame JSON handoff to Lucas
-- parallel SVO recording
-
-The detector boundary and exact minimum payload still need confirmation, but the high-level live contract is now decided.
+The detector boundary is decided (JSONL file handoff). The exact minimum payload still needs confirmation with Lucas.

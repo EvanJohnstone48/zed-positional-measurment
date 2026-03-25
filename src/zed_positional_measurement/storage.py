@@ -33,6 +33,15 @@ def write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
             handle.write("\n")
 
 
+def append_jsonl(path: Path, record: dict[str, Any]) -> None:
+    """Append a single JSON record to a JSONL file, creating it if needed."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8", newline="\n") as handle:
+        handle.write(json.dumps(record, sort_keys=True))
+        handle.write("\n")
+        handle.flush()
+
+
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
@@ -76,6 +85,14 @@ class SessionPaths:
     @property
     def stream_dir(self) -> Path:
         return self.root / "stream"
+
+    @property
+    def telemetry_dir(self) -> Path:
+        return self.root / "telemetry"
+
+    @property
+    def telemetry_jsonl_path(self) -> Path:
+        return self.telemetry_dir / "telemetry.jsonl"
 
     @property
     def session_metadata_path(self) -> Path:
@@ -129,6 +146,7 @@ def create_session_paths(root_dir: Path | str, session_id: str) -> SessionPaths:
         paths.cache_dir,
         paths.exports_dir,
         paths.stream_dir,
+        paths.telemetry_dir,
     ):
         directory.mkdir(parents=True, exist_ok=True)
     return paths
@@ -232,6 +250,10 @@ class SessionStore:
         path = self.paths.segment_measurement_cache_path(segment_id, finalized=finalized)
         write_jsonl(path, (row.to_dict() for row in rows))
         return path
+
+    def append_frame_to_stream(self, frame: FrameRecord) -> None:
+        """Append a single frame record to the streaming frames.jsonl output."""
+        append_jsonl(self.paths.frames_jsonl_path, frame.to_dict())
 
     def read_pose_cache(self, segment_id: str, finalized: bool) -> list[PoseRecord]:
         return read_typed_jsonl(self.paths.segment_pose_cache_path(segment_id, finalized=finalized), PoseRecord.from_dict)

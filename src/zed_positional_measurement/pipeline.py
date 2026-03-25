@@ -29,13 +29,34 @@ from .models import (
     SegmentManifestEntry,
     TrackingMode,
 )
-from .providers import SegmentJsonlCornerProvider, SegmentJsonlPaperProvider
+from .providers import SegmentJsonlCornerProvider, SegmentJsonlPaperProvider, TailingPaperProvider
 from .sdk import DetectionContext, FrameBuffers, PaperObservation, PlaneSnapshot, PoseSnapshot, ZedSdkAdapter
 from .storage import SessionStore, utc_time_ns, write_jsonl
 
 
 def _worker_main(config_dict: dict[str, Any], session_root: str, segment_queue: Any) -> None:
-    pipeline = MeasurementPipeline(PipelineConfig.from_dict(config_dict))
+    config = PipelineConfig.from_dict(config_dict)
+    stream_frames = config.streaming.enabled
+    # When streaming is enabled, use TailingPaperProvider to read Worker 1's detection output
+    paper_provider: SegmentJsonlPaperProvider | TailingPaperProvider | None = None
+    if stream_frames and config.streaming.detector_output_dir:
+        paper_provider = TailingPaperProvider(
+            root_dir=Path(config.streaming.detector_output_dir),
+            poll_interval_ms=config.streaming.detector_poll_interval_ms,
+            timeout_ms=config.streaming.detector_timeout_ms,
+        )
+    telemetry_provider = None
+    if config.telemetry.enabled:
+        from .telemetry import TelemetryProvider
+
+        telemetry_path = Path(session_root) / "telemetry" / "telemetry.jsonl"
+        telemetry_provider = TelemetryProvider(
+            telemetry_path,
+            poll_interval_ms=config.telemetry.poll_interval_ms,
+            timeout_ms=config.telemetry.timeout_ms,
+            max_alignment_offset_ns=config.telemetry.max_alignment_offset_ns,
+        )
+    pipeline = MeasurementPipeline(config, paper_provider=paper_provider, telemetry_provider=telemetry_provider)
     while True:
         try:
             segment_id = segment_queue.get()
@@ -43,7 +64,7 @@ def _worker_main(config_dict: dict[str, Any], session_root: str, segment_queue: 
             break
         if segment_id is None:
             break
-        pipeline.process_segment(session_root, str(segment_id), finalized=False)
+        pipeline.process_segment(session_root, str(segment_id), finalized=False, stream_frames=stream_frames)
 
 
 @dataclass(frozen=True)
@@ -60,8 +81,9 @@ class MeasurementPipeline:
         config: PipelineConfig,
         *,
         adapter: ZedSdkAdapter | None = None,
-        paper_provider: SegmentJsonlPaperProvider | None = None,
+        paper_provider: SegmentJsonlPaperProvider | TailingPaperProvider | None = None,
         corner_provider: SegmentJsonlCornerProvider | None = None,
+        telemetry_provider: Any | None = None,
     ) -> None:
         self.config = config
         self.adapter = adapter or ZedSdkAdapter()
@@ -71,6 +93,7 @@ class MeasurementPipeline:
         self.corner_provider = corner_provider or SegmentJsonlCornerProvider(
             Path(config.corners.detections_dir) if config.corners.detections_dir else None
         )
+        self.telemetry_provider = telemetry_provider
 
     def run_live_session(self) -> Path:
         self._validate_for_processing(process_in_background=True, finalize_at_end=True)
@@ -90,6 +113,16 @@ class MeasurementPipeline:
         camera = self.adapter.open_live_camera(self.config.recording)
         runtime = self.adapter.build_runtime_parameters()
         recording_enabled = self.config.recording.enable_svo_recording
+
+        telemetry_collector = None
+        if self.config.telemetry.enabled:
+            from .telemetry import TelemetryCollector
+
+            telemetry_collector = TelemetryCollector(
+                output_path=store.paths.telemetry_jsonl_path,
+                config=self.config.telemetry,
+            )
+            telemetry_collector.start()
 
         ctx: Any | None = None
         worker: Any | None = None
@@ -150,6 +183,8 @@ class MeasurementPipeline:
         finally:
             if recording_enabled and current_segment_id is not None:
                 close_segment()
+            if telemetry_collector is not None:
+                telemetry_collector.stop()
             self.adapter.close_camera(camera)
             if segment_queue is not None:
                 segment_queue.put(None)
@@ -176,7 +211,14 @@ class MeasurementPipeline:
             self.process_segment(store.paths.root, entry.segment_id, finalized=True)
         self.export_session(store.paths.root)
 
-    def process_segment(self, session_root: Path | str, segment_id: str, *, finalized: bool) -> None:
+    def process_segment(
+        self,
+        session_root: Path | str,
+        segment_id: str,
+        *,
+        finalized: bool,
+        stream_frames: bool = False,
+    ) -> None:
         store = SessionStore.open(session_root)
         entry = store.read_segment_manifest(segment_id)
         tracking_mode = self._tracking_mode_for_phase(store, finalized)
@@ -220,6 +262,9 @@ class MeasurementPipeline:
                         segment_id,
                         local_frame_idx,
                     )
+                    telemetry_record = None
+                    if self.telemetry_provider is not None:
+                        telemetry_record = self.telemetry_provider.get(pose.timestamp_ns)
                     frame_record, paper_measurements = self._frame_record_and_paper_measurements(
                         camera=camera,
                         buffers=buffers,
@@ -228,8 +273,11 @@ class MeasurementPipeline:
                         segment_id=segment_id,
                         frame_idx=frame_idx,
                         observations=observations,
+                        telemetry=telemetry_record,
                     )
                     frame_rows.append(frame_record)
+                    if stream_frames:
+                        store.append_frame_to_stream(frame_record)
                     measurement_rows.extend(paper_measurements)
                     measurement_rows.extend(
                         self._corner_measurements(
@@ -341,6 +389,7 @@ class MeasurementPipeline:
         segment_id: str,
         frame_idx: int,
         observations: Sequence[PaperObservation],
+        telemetry: Any | None = None,
     ) -> tuple[FrameRecord, list[MeasurementRecord]]:
         paper_rows: list[tuple[PaperObservation, tuple[float, float, float] | None, float | None, PlaneSnapshot]] = []
         plane_candidates: list[_PlaneCandidate] = []
@@ -416,6 +465,7 @@ class MeasurementPipeline:
             pose_world_xyzw=pose.pose_world_xyzw,
             planes=tuple(planes),
             papers=tuple(frame_papers),
+            telemetry=telemetry,
         )
         return frame_record, measurement_rows
 

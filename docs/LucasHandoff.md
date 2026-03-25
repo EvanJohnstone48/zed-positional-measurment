@@ -2,17 +2,9 @@
 
 ## Status
 
-This document describes the intended live handoff contract.
+This document describes the streaming handoff contract.
 
-The current runtime in the repo is still replay-first.
-
-What exists now:
-
-- replay processing/finalization writes frame-oriented outputs with `planes[]` and `papers[].plane_id`
-
-What still needs the live refactor:
-
-- writing those frame objects live during recording for Lucas to tail in flight
+The pipeline uses SVO-first streaming: background workers replay SVO2 segments and stream frame objects to `frames.jsonl` per-frame during recording. Lucas can tail this file during flight.
 
 ## Purpose
 
@@ -30,7 +22,7 @@ Lucas's role:
 
 Lucas's code runs on the same Jetson on the drone.
 
-This means the simplest and recommended boundary is a local append-only file handoff, not replay-first processing and not a remote network dependency.
+This means the simplest and recommended boundary is a local append-only file handoff, not a remote network dependency. The pipeline streams frame objects to `frames.jsonl` per-frame during SVO replay processing.
 
 ## Canonical Live Input
 
@@ -153,16 +145,15 @@ If a step specifically needs plane data, also require:
 
 ## Connection Model
 
-### Intended v1 Connection
+### v1 Connection (SVO-First Streaming)
 
-1. the ZED pipeline runs live
-2. the external detector supplies current-frame paper centers
-3. this repo runs multiple ZED plane queries for the frame
-4. this repo packages one frame JSON object with `planes[]` and `papers[]`
-5. this repo appends that frame object to `stream/frames.jsonl`
-6. Lucas tails the same file locally and clusters measurements live
-
-There is no replay dependency in the intended runtime path.
+1. the live thread records SVO2 segments
+2. Worker 1 (external NN detector) replays SVO2 segments and writes detection JSONL
+3. Worker 2 (this repo) replays SVO2 segments for tracking/depth/planes
+4. Worker 2 reads Worker 1's detection JSONL per frame
+5. Worker 2 packages one frame JSON object with `planes[]` and `papers[]`
+6. Worker 2 appends that frame object to `stream/frames.jsonl`
+7. Lucas tails the same file locally and clusters measurements
 
 ## Example Paper Payload
 
@@ -211,13 +202,14 @@ So multiple planes per frame are feasible, but only by running multiple plane qu
 
 ## SVO Recording
 
-SVO2 is only recorded in parallel when `recording.enable_svo_recording` is `true`, but Lucas should not depend on replay to get measurements.
+SVO2 recording is required for the pipeline to function. The SVO2 file is the source of truth — both Worker 1 and Worker 2 replay it for processing.
 
-The SVO file exists for:
+The SVO file serves:
 
+- source data for Worker 1 (NN detector) and Worker 2 (measurement pipeline)
 - audit/debugging
 - future offline analysis
-- neural-net workflows
+- GNSS fusion replay (GNSS data stored as sidecar or embedded via SVO2 custom data)
 
 ## Summary
 

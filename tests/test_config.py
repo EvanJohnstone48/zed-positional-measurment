@@ -46,6 +46,33 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(config.plane_detection.include_floor_plane)
         self.assertEqual(len(config.plane_detection.scene_probe_points_normalized), 9)
 
+    def test_telemetry_config_defaults_when_omitted(self) -> None:
+        config = PipelineConfig.from_dict({})
+        self.assertFalse(config.telemetry.enabled)
+        self.assertEqual(config.telemetry.snapshot_rate_hz, 30)
+        self.assertIn("local_position", config.telemetry.topics)
+        self.assertEqual(config.telemetry.max_alignment_offset_ns, 100_000_000)
+
+    def test_telemetry_config_round_trip(self) -> None:
+        config = PipelineConfig.from_dict(
+            {
+                "telemetry": {
+                    "enabled": True,
+                    "snapshot_rate_hz": 15,
+                    "timeout_ms": 5000,
+                },
+            }
+        )
+        self.assertTrue(config.telemetry.enabled)
+        self.assertEqual(config.telemetry.snapshot_rate_hz, 15)
+        self.assertEqual(config.telemetry.timeout_ms, 5000)
+
+        payload = config.to_dict()
+        restored = PipelineConfig.from_dict(payload)
+        self.assertEqual(restored.telemetry.enabled, True)
+        self.assertEqual(restored.telemetry.snapshot_rate_hz, 15)
+        self.assertEqual(restored.telemetry.timeout_ms, 5000)
+
     def test_scale_helpers_convert_detector_coordinates_to_native_image_size(self) -> None:
         self.assertEqual(scale_bbox_xyxy((10, 5, 20, 15), (50, 25), (100, 50)), (20, 10, 40, 30))
         self.assertEqual(scale_point((5, 5), (50, 25), (100, 50)), (10, 10))

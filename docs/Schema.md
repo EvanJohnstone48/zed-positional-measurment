@@ -2,14 +2,9 @@
 
 ## Status
 
-This document describes the target live handoff schema.
+This document describes the streaming handoff schema.
 
-The current runtime in the repo is still replay-first, but it now also writes frame-oriented outputs during replay processing/finalization:
-
-- per-segment frame caches under `cache/<segment_id>/frames.<suffix>.jsonl`
-- finalized combined frame output at `stream/frames.jsonl`
-
-Live append-only writing during recording still remains to be implemented.
+The pipeline streams frame objects to `frames.jsonl` per-frame during SVO2 replay processing. It also writes per-segment frame caches under `cache/<segment_id>/frames.<suffix>.jsonl`.
 
 ## Primary Handoff Artifact
 
@@ -546,6 +541,55 @@ Current intended values:
 - `depth_invalid`
 - `clean`
 
+## Telemetry
+
+Each frame optionally includes a `telemetry` object with PX4 flight controller data. This is `null` when telemetry collection is disabled or unavailable.
+
+Target shape:
+
+```json
+{
+  "heading_rad": 1.57,
+  "heading_var": 0.01,
+  "heading_good_for_control": true,
+  "gps_lat_deg": 49.2,
+  "gps_lon_deg": -123.1,
+  "gps_alt_m": 100.0,
+  "gps_eph": 1.2,
+  "gps_epv": 2.3,
+  "gps_fix_type": 3,
+  "gps_hdop": 0.8,
+  "gps_satellites_used": 12,
+  "mag_xyz_gauss": [0.1, 0.2, 0.3],
+  "imu_gyro_rad": [0.01, 0.02, 0.03],
+  "imu_accel_m_s2": [0.0, 0.0, -9.81],
+  "alignment_offset_ns": 5000
+}
+```
+
+### Telemetry Fields
+
+- `heading_rad`: Fused EKF yaw from PX4 `VehicleLocalPosition.heading` (radians, -PI..+PI). This is magnetometer-fused heading, not raw mag.
+- `heading_var`: Heading variance from PX4.
+- `heading_good_for_control`: PX4's assessment of heading reliability.
+- `gps_lat_deg`, `gps_lon_deg`, `gps_alt_m`: Fused GPS position from `VehicleGlobalPosition` (WGS84).
+- `gps_eph`, `gps_epv`: Horizontal and vertical position uncertainty (meters).
+- `gps_fix_type`: GPS fix type from `SensorGps` (0=no fix, 3=3D fix, 5=RTK float, 6=RTK fixed).
+- `gps_hdop`: Horizontal dilution of precision.
+- `gps_satellites_used`: Number of satellites used in fix.
+- `mag_xyz_gauss`: Raw magnetometer vector (Gauss) from `SensorMag` in body frame.
+- `imu_gyro_rad`: Angular velocity (rad/s) from `SensorCombined` in body frame.
+- `imu_accel_m_s2`: Acceleration (m/s^2) from `SensorCombined` in body frame.
+- `alignment_offset_ns`: Absolute time difference between the ZED frame timestamp and the nearest telemetry sample. Lets Lucas assess staleness.
+
+All telemetry fields are nullable. If PX4 topics are not publishing, fields will be `null`.
+
+### How Lucas Should Use Telemetry
+
+- `heading_rad` is the primary field for determining building corner bearings in a global reference frame.
+- `gps_*` fields provide global positioning for geo-referencing measurements.
+- `alignment_offset_ns` should be checked — values above ~50ms indicate the telemetry may not be well-aligned with the frame.
+
 ## Fields Lucas Should Treat As Primary
 
 - top-level:
@@ -554,6 +598,8 @@ Current intended values:
   - `tracking_state`
   - `pose_world_xyz`
   - `planes`
+  - `telemetry.heading_rad`
+  - `telemetry.gps_lat_deg`, `telemetry.gps_lon_deg`
 - per-paper:
   - `color`
   - `point_world_xyz`
@@ -583,18 +629,9 @@ runs/<session_id>/
   session.json
   capture/session.svo2
   stream/frames.jsonl
+  telemetry/telemetry.jsonl
   logs/events.jsonl
 ```
 
-`capture/session.svo2` is optional and only exists when `recording.enable_svo_recording` is `true`.
-
-## Detector Input Contract
-
-The detector is external. The exact input contract into this repo is still not final, but the working assumptions are:
-
-- center pixel
-- color/class
-- confidence
-- frame association
-
-See [Uncertainties.md](Uncertainties.md).
+- `capture/session.svo2` stores the SVO2 recording that Worker 1 and Worker 2 replay for processing.
+- `telemetry/telemetry.jsonl` stores timestamped PX4 telemetry snapshots collected during recording. Written by the `TelemetryCollector` at camera frame rate. Read by Worker 2 during SVO2 replay for time-aligned frame attachment.

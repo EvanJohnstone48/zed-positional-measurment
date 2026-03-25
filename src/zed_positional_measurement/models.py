@@ -295,6 +295,64 @@ class FramePaperRecord:
 
 
 @dataclass(frozen=True)
+class FrameTelemetryRecord:
+    heading_rad: float | None
+    heading_var: float | None
+    heading_good_for_control: bool | None
+    gps_lat_deg: float | None
+    gps_lon_deg: float | None
+    gps_alt_m: float | None
+    gps_eph: float | None
+    gps_epv: float | None
+    gps_fix_type: int | None
+    gps_hdop: float | None
+    gps_satellites_used: int | None
+    mag_xyz_gauss: tuple[float, float, float] | None
+    imu_gyro_rad: tuple[float, float, float] | None
+    imu_accel_m_s2: tuple[float, float, float] | None
+    alignment_offset_ns: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "heading_rad": self.heading_rad,
+            "heading_var": self.heading_var,
+            "heading_good_for_control": self.heading_good_for_control,
+            "gps_lat_deg": self.gps_lat_deg,
+            "gps_lon_deg": self.gps_lon_deg,
+            "gps_alt_m": self.gps_alt_m,
+            "gps_eph": self.gps_eph,
+            "gps_epv": self.gps_epv,
+            "gps_fix_type": self.gps_fix_type,
+            "gps_hdop": self.gps_hdop,
+            "gps_satellites_used": self.gps_satellites_used,
+            "mag_xyz_gauss": list(self.mag_xyz_gauss) if self.mag_xyz_gauss else None,
+            "imu_gyro_rad": list(self.imu_gyro_rad) if self.imu_gyro_rad else None,
+            "imu_accel_m_s2": list(self.imu_accel_m_s2) if self.imu_accel_m_s2 else None,
+            "alignment_offset_ns": self.alignment_offset_ns,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "FrameTelemetryRecord":
+        return cls(
+            heading_rad=float(data["heading_rad"]) if data.get("heading_rad") is not None else None,
+            heading_var=float(data["heading_var"]) if data.get("heading_var") is not None else None,
+            heading_good_for_control=bool(data["heading_good_for_control"]) if data.get("heading_good_for_control") is not None else None,
+            gps_lat_deg=float(data["gps_lat_deg"]) if data.get("gps_lat_deg") is not None else None,
+            gps_lon_deg=float(data["gps_lon_deg"]) if data.get("gps_lon_deg") is not None else None,
+            gps_alt_m=float(data["gps_alt_m"]) if data.get("gps_alt_m") is not None else None,
+            gps_eph=float(data["gps_eph"]) if data.get("gps_eph") is not None else None,
+            gps_epv=float(data["gps_epv"]) if data.get("gps_epv") is not None else None,
+            gps_fix_type=int(data["gps_fix_type"]) if data.get("gps_fix_type") is not None else None,
+            gps_hdop=float(data["gps_hdop"]) if data.get("gps_hdop") is not None else None,
+            gps_satellites_used=int(data["gps_satellites_used"]) if data.get("gps_satellites_used") is not None else None,
+            mag_xyz_gauss=_to_float_tuple(data.get("mag_xyz_gauss"), 3),  # type: ignore[arg-type]
+            imu_gyro_rad=_to_float_tuple(data.get("imu_gyro_rad"), 3),  # type: ignore[arg-type]
+            imu_accel_m_s2=_to_float_tuple(data.get("imu_accel_m_s2"), 3),  # type: ignore[arg-type]
+            alignment_offset_ns=int(data["alignment_offset_ns"]),
+        )
+
+
+@dataclass(frozen=True)
 class FrameRecord:
     session_id: str
     frame_idx: int
@@ -305,6 +363,7 @@ class FrameRecord:
     pose_world_xyzw: tuple[float, float, float, float] | None
     planes: tuple[FramePlaneRecord, ...] = field(default_factory=tuple)
     papers: tuple[FramePaperRecord, ...] = field(default_factory=tuple)
+    telemetry: FrameTelemetryRecord | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -317,10 +376,12 @@ class FrameRecord:
             "pose_world_xyzw": list(self.pose_world_xyzw) if self.pose_world_xyzw else None,
             "planes": [plane.to_dict() for plane in self.planes],
             "papers": [paper.to_dict() for paper in self.papers],
+            "telemetry": self.telemetry.to_dict() if self.telemetry else None,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "FrameRecord":
+        raw_telemetry = data.get("telemetry")
         return cls(
             session_id=str(data["session_id"]),
             frame_idx=int(data["frame_idx"]),
@@ -331,6 +392,7 @@ class FrameRecord:
             pose_world_xyzw=_to_float_tuple(data.get("pose_world_xyzw"), 4),  # type: ignore[arg-type]
             planes=tuple(FramePlaneRecord.from_dict(row) for row in data.get("planes", [])),
             papers=tuple(FramePaperRecord.from_dict(row) for row in data.get("papers", [])),
+            telemetry=FrameTelemetryRecord.from_dict(raw_telemetry) if raw_telemetry else None,
         )
 
 
